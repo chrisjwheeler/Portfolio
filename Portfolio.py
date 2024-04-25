@@ -26,6 +26,7 @@ class Portfolio:
 
         else:
             self.conn = sqlite3.connect(db_file)
+            # Add functionaility which checks table is of the same format.
             self.cursor = self.conn.cursor()
     
     def create_table(self):
@@ -39,6 +40,9 @@ class Portfolio:
             )
         ''')
         self.conn.commit()
+
+    def __str__(self):
+        return str(pd.read_sql('SELECT * FROM portfolio', self.conn))
 
     def add_position_single(self, symbol, direction, shares, purchase_price, purchase_date):
         self.cursor.execute('''
@@ -54,26 +58,26 @@ class Portfolio:
 
         df.to_sql('portfolio', self.conn, if_exists='append', index=False)
 
-    def add_past_position(self, df, purchase_date: str):
+    def add_past_position(self, df, purchase_date: str, type: str = 'open'):
         '''This takes a data frame of symbols, direction, shares, along with a purchase date and adds it to the portfolio'''
         
+        assert type in ['open', 'close', 'current'], 'type must be either "close", "open" or "current"'
+
         if set(df.columns) != set(['symbol', 'direction', 'shares']):   # Ensure the DataFrame has the correct columns
             raise ValueError('DataFrame must have columns: symbol, direction, shares')
         
-        pricedict = self._createPriceDict(df, 'open', purchase_date)
+        pricedict = self._createPriceDict(df, type, purchase_date)
 
         for _, trade in df.iterrows():  # I am going to be slightly lazy and just insert one by one
             symbol = trade['symbol']
             purchase_price = pricedict[symbol]
 
             self.add_position_single(symbol, trade['direction'], trade['shares'], purchase_price, purchase_date)
-
-    def _profitPerTrade(self, trade, pricedict, builtin: str = 'pershare', ppt_func=None):
+        
+    def _profitPerTrade(self, trade, pricedict, pershare=True):
         '''This function will return the profit per trade, given the trade, pricedict, and the type of profit. The profit type can be either 'pershare', 'percentage', or 'custom'.
         If custom is chosen, a function must be passed to ppt_func, which will take ppt, purchase_price, num_shares as arguments and return the profit. '''
         
-        assert builtin in ['pershare', 'percentage', 'custom'], 'builtin must be either "pershare", "percentage", or "custom"'
-
         symbol = trade['symbol']
         num_shares = trade['shares']
         direction = trade['direction']
@@ -84,18 +88,14 @@ class Portfolio:
         else:
             ppt = purchase_price - pricedict[symbol]
 
-        if builtin == 'pershare':
+        if pershare:
             return ppt * num_shares
-        elif builtin == 'percentage':
-            return num_shares * ppt / purchase_price
         else:
-            if ppt_func is None:
-                raise ValueError('ppt_func must be a function')
-            return ppt_func(ppt, purchase_price, num_shares)
+            return num_shares * ppt / purchase_price
 
     def _createPriceDict(self, df, type: str, date: str = None):
         '''This function will create a dictionary of the most recent prices for each symbol in the portfolio, returns price dict. Type must be either 'close' or 'current' '''
-        assert type in ['close', 'current'], 'type must be either "close" or "current"'
+        assert type in ['open', 'close', 'current'], 'type must be either "close", "open" or "current"'
         
         symbols = tuple(sorted(list(set(df['symbol'].to_list())))) # For hashing we want the list to always be sorted, but we require it to be immutable
         return self._createPriceDictCache(symbols, type, date)
@@ -144,36 +144,36 @@ class Portfolio:
         each_trade_val = portfolio_df['shares'] * portfolio_df['purchase_price']
         return sum(each_trade_val)
     
-    def getValue(self, time_type: str = None, profit_type: str = None, date: str = None):
-        '''This will get either the close value, at a given date, or the current value. Giving either as absolute or percentage profit.'''
         
-        assert profit_type in ['percentage', 'absolute'], 'profit_type must be either "percentage" or "absolute"'
-        assert time_type in ['current', 'close'], 'time_type must be either "current" or "close"'
-        
-        portfolio_df = pd.read_sql('SELECT * FROM portfolio', self.conn)
+    def absoluteProfit(self, time_type: str = 'current', date: str = None):
+        ''' I dont really like the new way of doing the percentage profit, I think it is a bit too complicated. 
+            And unnintuative Time type should be either 'current', 'close', or 'open' and date should be a string in the format 'YYYY-MM-DD' '''
 
-        if time_type == 'current':
-            pricedict = self._createPriceDict(portfolio_df, 'current')
-        elif time_type == 'close':
-            pricedict = self._createPriceDict(portfolio_df, 'close', date)
+        portfolio_df = pd.read_sql('SELECT * FROM portfolio', self.conn)
+        pricedict = self._createPriceDict(portfolio_df, time_type, date)
 
         running_calculation = 0
-
         for _, trade in portfolio_df.iterrows():
-            prof = self._profitPerTrade(trade, pricedict, 'absolute')
+            prof = self._profitPerTrade(trade, pricedict, 'pershare')
             running_calculation += prof
-        
-        if profit_type == 'percentage': 
-            return running_calculation / self.initalValue()
-        else: # Absolute case.
-            return running_calculation 
-        
-    def absoluteProfit(self, time_type: str = None, date: str = None):
-        raise NotImplementedError('This function is not implemented yet')
-        return self.getValue(time_type, 'absolute', date)
 
-    def percentageProfit(self, time_type: str = None, date: str = None):
-        return self.getValue(time_type, 'percentage', date)
+        return running_calculation 
+        
+
+    def percentageProfit(self, time_type: str = 'current', date: str = None):
+        ''' I dont really like the new way of doing the percentage profit, I think it is a bit too complicated. 
+            And unnintuative Time type should be either 'current', 'close', or 'open' and date should be a string in the format 'YYYY-MM-DD' '''
+
+        portfolio_df = pd.read_sql('SELECT * FROM portfolio', self.conn)
+        pricedict = self._createPriceDict(portfolio_df, time_type, date)
+
+        running_calculation = 0
+        for _, trade in portfolio_df.iterrows():
+            prof = self._profitPerTrade(trade, pricedict, 'pershare')
+            running_calculation += prof
+
+        return running_calculation / self.initalValue()
+        
         
     def trade_sell_after(self, days: int):
         ''' Calculates the profit of selling each position after a days amount of days after it was purchased. I am not sure how to handle weekends yet.'''
@@ -193,18 +193,36 @@ class Portfolio:
             purchase_date_df = df[df['purchase_date'] == purchase_date]
             pricedict = self._createPriceDict(purchase_date_df, 'close', sell_date)
             for _, trade in purchase_date_df.iterrows():
-                portfolio_value += self._profitPerTrade(trade, pricedict, 'percentage')
+                portfolio_value += self._profitPerTrade(trade, pricedict)
 
-        return portfolio_value
+        return portfolio_value / self.initalValue()
+    
+    def volatility(self):
+        '''This function will return the volatility of the portfolio'''
+
+        df = pd.read_sql('SELECT * FROM portfolio', self.conn)
+
+        dates = pd.to_datetime(df['purchase_date'])
+        dates = dates.sort_values()
+
+        raw_daily_returns = [self.absoluteProfit('close', date) for date in dates]
+        daily_returns = [raw_daily_returns[i] - raw_daily_returns[i-1] for i in range(1, len(raw_daily_returns))]
+
+        return pd.Series(daily_returns).std()
+    
+    def sharpe_ratio(self, risk_free_rate: float = 0.02):
+        '''This function will return the sharpe ratio of the portfolio, the risk free rate should be in decimal form'''
+        return (self.percentageProfit() - risk_free_rate) / self.volatility()
+    
     
     def upDown(self, verbose: bool = False):
-        '''This function will return the percentage of the portfolio as well a list of what is up and  that is up and the percentage that is down'''
+        '''This function will return the percentage of the portfolio that is up and the percentage that is down'''
         df = pd.read_sql('SELECT * FROM portfolio', self.conn)
         pricedict = self._createPriceDict(df, 'current')
 
         num_positions = len(df)
         up, down = [], []
-        
+
         for _, trade in df.iterrows():
             pps = self._profitPerTrade(trade, pricedict)
             if pps >= 0:
@@ -212,33 +230,28 @@ class Portfolio:
             else:
                 down.append(trade)
 
+        percentage_up = len(up) / num_positions * 100
+
         if verbose:
-            retstr = f'''Percentage of positions profiting: {len(up) / num_positions * 100}%
-            Positions that are up: {up}
-            Positions that are down: {down}'''
+            retstr = f'''Percentage of positions profiting: {percentage_up:.2f}% 
+            Positions that are up: {", ".join([str(trade['symbol']) for trade in up])[:100]}
+            Positions that are down: {", ".join([str(trade['symbol']) for trade in down])[:100]}'''
         else:
-            retstr = f'''Percentage of positions profiting: {len(up) / num_positions * 100}%'''
+            retstr = f'''Percentage of positions profiting: {percentage_up:.2f}%'''
 
         return retstr
     
     def generate_test_data(self):
         '''This function will generate some test data for the portfolio'''
         test_data = [
-            ('AAPL', 'long', 1, 0, '2021-01-01'),
-            ('GOOGL', 'long', 1, 0, '2021-02-01'),
-            ('MSFT', 'long', 1, 0, '2021-03-01'),
-            ('AMZN', 'long', 1, 0, '2021-04-01'),
+            ('AAPL', 'long', 1, 100, '2021-01-01'),
+            ('GOOGL', 'long', 1, 300, '2021-02-01'),
+            ('MSFT', 'long', 1, 150, '2021-03-01'),
+            ('AMZN', 'long', 1, 20, '2021-04-01'),
         ]
 
-        for data in test_data:
-            self.add_position_single(*data)
-    
-    def close(self):
-        '''Redundant function, but it is good for peace of mind.'''
-        self.conn.close()
+        self.add_position_df(pd.DataFrame(test_data, columns=['symbol', 'direction', 'shares', 'purchase_price', 'purchase_date']))
 
     def __del__(self):
         if self.conn:
             self.conn.close()
-
-
